@@ -20,6 +20,22 @@ helpFunc(){
     echo ":::  -h,--help            Show this help dialog"
 }
 
+validIP(){
+	local ip=$1
+	local stat=1
+
+	if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+		OIFS=$IFS
+		IFS='.'
+		read -r -a ip <<< "$ip"
+		IFS=$OIFS
+		[[ ${ip[0]} -le 255 && ${ip[1]} -le 255 \
+		&& ${ip[2]} -le 255 && ${ip[3]} -le 255 ]]
+		stat=$?
+	fi
+	return $stat
+}
+
 # Parse input arguments
 while test $# -gt 0; do
     _key="$1"
@@ -32,6 +48,16 @@ while test $# -gt 0; do
                 shift
             fi
             CLIENT_NAME="$_val"
+            ;;
+        -ip|--ip-address)
+            if validIP $2 ; then
+		echo "ip $2 valid"
+		custIP="$2"
+		shift
+	    else
+		echo "$2 is not a valid ip, aborting"
+		exit 0
+	    fi
             ;;
         -h|--help)
             helpFunc
@@ -83,7 +109,8 @@ wg genkey | tee "keys/${CLIENT_NAME}_priv" | wg pubkey > "keys/${CLIENT_NAME}_pu
 wg genpsk | tee "keys/${CLIENT_NAME}_psk" &> /dev/null
 echo "::: Client Keys generated"
 
-# Find an unused number for the last octet of the client IP
+# Find an unused number for the last octet of the client IP if not given
+if [ "$custIP" == "" ]; then
 for i in {2..254}; do
     if ! grep -q " $i$" configs/clients.txt; then
         COUNT="$i"
@@ -91,12 +118,25 @@ for i in {2..254}; do
         break
     fi
 done
+else
+	echo "configuring with custom ip $custIP";
+	echo "${CLIENT_NAME} $(<keys/${CLIENT_NAME}_pub) $(date +%s) ${custIP}" >> configs/clients.txt
+#	exit 0;
+fi
 
 NET_REDUCED="${pivpnNET::-2}"
 
+if [ "$custIP" == "" ]; then
+	adr="${NET_REDUCED}.${COUNT}/${subnetClass}"
+	alAdr="${NET_REDUCED}.${COUNT}/32"
+else
+	adr="${custIP}/${subnetClass}"
+	alAdr="${custIP}/32"
+fi
+
 echo -n "[Interface]
 PrivateKey = $(cat "keys/${CLIENT_NAME}_priv")
-Address = ${NET_REDUCED}.${COUNT}/${subnetClass}
+Address = ${adr}
 DNS = ${pivpnDNS1}" > "configs/${CLIENT_NAME}.conf"
 
 if [ -n "${pivpnDNS2}" ]; then
@@ -106,18 +146,23 @@ else
 fi
 echo >> "configs/${CLIENT_NAME}.conf"
 
+# to allow trafic to live and test, replace allowed ips with this:
+# AllowedIPs = 185.170.114.39/32, 185.233.106.96/32, 10.10.0.0/16" >> "configs/${CLIENT_NAME}.conf"
+
 echo "[Peer]
 PublicKey = $(cat keys/server_pub)
 PresharedKey = $(cat "keys/${CLIENT_NAME}_psk")
 Endpoint = ${pivpnHOST}:${pivpnPORT}
-AllowedIPs = 0.0.0.0/0, ::0/0" >> "configs/${CLIENT_NAME}.conf"
+PersistentKeepalive = 10
+AllowedIPs = 10.10.0.0/16" >> "configs/${CLIENT_NAME}.conf"
 echo "::: Client config generated"
+
 
 echo "### begin ${CLIENT_NAME} ###
 [Peer]
 PublicKey = $(cat "keys/${CLIENT_NAME}_pub")
 PresharedKey = $(cat "keys/${CLIENT_NAME}_psk")
-AllowedIPs = ${NET_REDUCED}.${COUNT}/32
+AllowedIPs = ${alAdr}
 ### end ${CLIENT_NAME} ###" >> wg0.conf
 echo "::: Updated server config"
 
